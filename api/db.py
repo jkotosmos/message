@@ -43,6 +43,24 @@ def init_db() -> None:
           foreign key(senderId) references users(id),
           foreign key(recipientId) references users(id)
         );
+        create table if not exists refresh_tokens (
+          id text primary key,
+          userId text not null,
+          token text not null unique,
+          expiresAt integer not null,
+          createdAt integer not null,
+          foreign key(userId) references users(id)
+        );
+        create table if not exists push_subs (
+          id text primary key,
+          userId text not null,
+          endpoint text not null,
+          p256dh text not null,
+          auth text not null,
+          createdAt integer not null,
+          unique(userId, endpoint),
+          foreign key(userId) references users(id)
+        );
         """
     )
     conn.commit()
@@ -144,6 +162,24 @@ def list_messages(user_a: str, user_b: str) -> List[Dict[str, Any]]:
         ),
         (user_a, user_b, user_b, user_a),
     )
+    rows = [_row_to_dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def upsert_push_sub(user_id: str, endpoint: str, p256dh: str, auth: str, now_ms: int) -> None:
+    conn = _get_conn()
+    conn.execute(
+        "insert or replace into push_subs (id,userId,endpoint,p256dh,auth,createdAt) values (:id,:userId,:endpoint,:p256dh,:auth,:createdAt)",
+        {"id": str(uuid4()), "userId": user_id, "endpoint": endpoint, "p256dh": p256dh, "auth": auth, "createdAt": now_ms},
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_push_subs(user_id: str) -> List[Dict[str, Any]]:
+    conn = _get_conn()
+    cur = conn.execute("select * from push_subs where userId = ?", (user_id,))
     rows = [_row_to_dict(r) for r in cur.fetchall()]
     conn.close()
     return rows

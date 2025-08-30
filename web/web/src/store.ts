@@ -9,7 +9,8 @@ type User = { id: string; phone: string; displayName: string; publicKey: string 
 type State = {
   apiBase: string;
   me: User | null;
-  token: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
   users: User[];
   socket: any | null;
   keys: KeyPair | null;
@@ -23,7 +24,8 @@ export const useAppStore = create<State>()(
   immer((set, get) => ({
     apiBase: import.meta.env.VITE_API_BASE || 'http://localhost:4000',
     me: null,
-    token: null,
+    accessToken: null,
+    refreshToken: null,
     users: [],
     socket: null,
     keys: loadKeysFromStorage(),
@@ -49,22 +51,23 @@ export const useAppStore = create<State>()(
       if (!res.ok) throw new Error(data.error || 'Registration failed');
       set((s) => {
         s.me = data.user;
-        s.token = data.token;
+        s.accessToken = data.accessToken;
+        s.refreshToken = data.refreshToken;
       });
     },
     async loadUsers() {
-      const { token, apiBase } = get();
-      if (!token) return;
+      const { accessToken, apiBase } = get();
+      if (!accessToken) return;
       const res = await fetch(`${apiBase}/api/users`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load users');
       set((s) => void (s.users = data.users));
     },
     connectSocket() {
-      const { token, me, apiBase } = get();
-      if (!token || !me) return;
+      const { accessToken, me, apiBase } = get();
+      if (!accessToken || !me) return;
       if (get().socket) return;
       const socket = io(apiBase, { transports: ['websocket'] });
       socket.on('connect', () => {

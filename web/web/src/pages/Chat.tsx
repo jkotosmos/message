@@ -5,7 +5,7 @@ import { computeSharedKey, decryptWithSharedKey, encryptWithSharedKey } from '..
 import { createCallPeer, deriveCallKey } from '../lib/webrtc';
 
 export default function Chat() {
-  const { me, token, users, apiBase, connectSocket, socket, keys } = useAppStore();
+  const { me, accessToken, users, apiBase, connectSocket, socket, keys } = useAppStore();
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
@@ -16,9 +16,9 @@ export default function Chat() {
   const rtcRef = useRef<any>(null);
 
   useEffect(() => {
-    if (!token) return;
+    if (!accessToken) return;
     connectSocket();
-  }, [token]);
+  }, [accessToken]);
 
   useEffect(() => {
     if (!socket) return;
@@ -32,11 +32,11 @@ export default function Chat() {
   }, [socket]);
 
   useEffect(() => {
-    if (!selected || !token) return;
-    fetch(`${apiBase}/api/messages/${selected}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!selected || !accessToken) return;
+    fetch(`${apiBase}/api/messages/${selected}`, { headers: { Authorization: `Bearer ${accessToken}` } })
       .then((r) => r.json())
       .then((d) => setMessages(d.messages || []));
-  }, [selected, token]);
+  }, [selected, accessToken]);
 
   useEffect(() => {
     sharedKey.current = null;
@@ -44,7 +44,7 @@ export default function Chat() {
 
   async function ensureSharedKey(peerId: string) {
     if (sharedKey.current) return sharedKey.current;
-    const res = await fetch(`${apiBase}/api/users/${peerId}/key`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`${apiBase}/api/users/${peerId}/key`, { headers: { Authorization: `Bearer ${accessToken}` } });
     const data = await res.json();
     if (!keys) throw new Error('No keys');
     const sk = computeSharedKey(keys.secretKey, data.publicKey);
@@ -59,7 +59,7 @@ export default function Chat() {
     const { ciphertext, nonce } = encryptWithSharedKey(sk, input);
     const res = await fetch(`${apiBase}/api/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
       body: JSON.stringify({ recipientId: selected, ciphertext, nonce }),
     });
     const data = await res.json();

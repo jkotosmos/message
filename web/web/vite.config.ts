@@ -18,6 +18,7 @@ export default defineConfig({
         start_url: '/',
         icons: [],
       },
+      strategies: 'generateSW',
     }),
   ],
 })

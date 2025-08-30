@@ -1,12 +1,16 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import secrets
 import time
 import socketio
 from typing import Optional
+from fastapi.staticfiles import StaticFiles
+import os
+from pywebpush import webpush, WebPushException
 
 from . import db
+from . import auth
 
 
 app = FastAPI(title="NeonTalk API")
@@ -40,11 +44,11 @@ class PostMessageBody(BaseModel):
 def auth_user(authorization: Optional[str] = Header(None)):
     if not authorization:
         raise HTTPException(401, detail="missing authorization")
-    token = authorization.replace("Bearer", "").strip()
-    session = db.get_session_by_token(token)
-    if not session:
+    bearer = authorization.replace("Bearer", "").strip()
+    payload = auth.verify_access_token(bearer)
+    if not payload:
         raise HTTPException(401, detail="invalid token")
-    user = db.get_user_by_id(session["userId"]) if session else None
+    user = db.get_user_by_id(payload["sub"]) if payload else None
     if not user:
         raise HTTPException(401, detail="user not found")
     return user
@@ -60,13 +64,15 @@ def register(body: RegisterBody):
     existing = db.get_user_by_phone(body.phone)
     now = int(time.time() * 1000)
     if existing:
-        token = secrets.token_urlsafe(24)
-        session = db.upsert_session(existing["id"], token, now)
-        return {"user": existing, "token": session["token"]}
+        access = auth.issue_access_token(existing["id"])
+        refresh = auth.issue_refresh_token()
+        db.upsert_session(existing["id"], refresh, now)
+        return {"user": existing, "accessToken": access, "refreshToken": refresh}
     user = db.create_user(body.phone, body.displayName, body.publicKey, now)
-    token = secrets.token_urlsafe(24)
-    session = db.upsert_session(user["id"], token, now)
-    return {"user": user, "token": session["token"]}
+    access = auth.issue_access_token(user["id"])
+    refresh = auth.issue_refresh_token()
+    db.upsert_session(user["id"], refresh, now)
+    return {"user": user, "accessToken": access, "refreshToken": refresh}
 
 
 @app.post("/api/login")
@@ -74,9 +80,25 @@ def login(body: LoginBody):
     user = db.get_user_by_phone(body.phone)
     if not user:
         raise HTTPException(404, detail="user not found")
-    token = secrets.token_urlsafe(24)
-    session = db.upsert_session(user["id"], token, int(time.time() * 1000))
-    return {"user": user, "token": session["token"]}
+    access = auth.issue_access_token(user["id"])
+    refresh = auth.issue_refresh_token()
+    db.upsert_session(user["id"], refresh, int(time.time() * 1000))
+    return {"user": user, "accessToken": access, "refreshToken": refresh}
+
+
+class RefreshBody(BaseModel):
+    refreshToken: str
+
+
+@app.post("/api/token/refresh")
+def refresh_token(body: RefreshBody):
+    sess = db.get_session_by_token(body.refreshToken)
+    if not sess:
+        raise HTTPException(401, detail="invalid refresh")
+    user = db.get_user_by_id(sess["userId"])
+    if not user:
+        raise HTTPException(401, detail="user not found")
+    return {"accessToken": auth.issue_access_token(user["id"])}
 
 
 @app.get("/api/me")
@@ -107,6 +129,20 @@ def get_messages(peer_id: str, user=Depends(auth_user)):
 def post_message(body: PostMessageBody, user=Depends(auth_user)):
     stored = db.store_message(user["id"], body.recipientId, body.ciphertext, body.nonce, int(time.time() * 1000))
     sio_server.emit("message:new", stored, to=f"user:{body.recipientId}")
+    # Web Push to recipient
+    for sub in db.list_push_subs(body.recipientId):
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": sub["endpoint"],
+                    "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+                },
+                data="{\"type\":\"message\"}",
+                vapid_private_key=VAPID_PRIVATE_KEY_PEM,
+                vapid_claims={"sub": VAPID_EMAIL},
+            )
+        except WebPushException:
+            pass
     return {"message": stored}
 
 
@@ -162,4 +198,68 @@ async def call_ice(sid, data):
 
 
 app_with_sockets = socketio.ASGIApp(sio_server, other_asgi_app=app)
+
+# Static media
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+app.mount("/media", StaticFiles(directory=UPLOAD_DIR), name="media")
+
+
+@app.post("/api/media")
+async def upload_media(file: UploadFile = File(...), user=Depends(auth_user)):
+    filename = f"{int(time.time() * 1000)}_{os.path.basename(file.filename)}"
+    dest = os.path.join(UPLOAD_DIR, filename)
+    with open(dest, "wb") as f:
+        f.write(await file.read())
+    return {"url": f"/media/{filename}"}
+
+
+# Web Push VAPID setup
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+
+VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com")
+VAPID_PRIVATE_KEY_PEM = os.environ.get("VAPID_PRIVATE_KEY", "")
+VAPID_PUBLIC_KEY_PEM = os.environ.get("VAPID_PUBLIC_KEY", "")
+
+if not VAPID_PRIVATE_KEY_PEM or not VAPID_PUBLIC_KEY_PEM:
+    _key = ec.generate_private_key(ec.SECP256R1())
+    VAPID_PRIVATE_KEY = _key
+    VAPID_PRIVATE_KEY_PEM = _key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    VAPID_PUBLIC_KEY_PEM = _key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+else:
+    VAPID_PRIVATE_KEY = serialization.load_pem_private_key(VAPID_PRIVATE_KEY_PEM.encode(), password=None)
+
+
+def _public_key_base64_from_pem(pem: str) -> str:
+    # Return base64-url encoded raw public key for PushManager
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key, Encoding, PublicFormat
+    from base64 import urlsafe_b64encode
+    pub = load_pem_public_key(pem.encode())
+    raw = pub.public_bytes(encoding=Encoding.X962, format=PublicFormat.UncompressedPoint)
+    return urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+@app.get("/api/push/vapid-public")
+def get_vapid_public():
+    return {"key": _public_key_base64_from_pem(VAPID_PUBLIC_KEY_PEM)}
+
+
+class PushSubBody(BaseModel):
+    endpoint: str
+    keys: dict
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(body: PushSubBody, user=Depends(auth_user)):
+    now = int(time.time() * 1000)
+    db.upsert_push_sub(user["id"], body.endpoint, body.keys.get("p256dh", ""), body.keys.get("auth", ""), now)
+    return {"ok": True}
 
