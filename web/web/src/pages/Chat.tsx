@@ -3,12 +3,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../store';
 import { computeSharedKey, decryptWithSharedKey, encryptWithSharedKey } from '../lib/crypto';
 import { createCallPeer, deriveCallKey } from '../lib/webrtc';
+import { authorizedFetch } from '../lib/api';
 
 export default function Chat() {
   const { me, accessToken, users, apiBase, connectSocket, socket, keys } = useAppStore();
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
+  const [file, setFile] = useState<File | null>(null);
   const sharedKey = useRef<Uint8Array | null>(null);
   const [, setInCall] = useState(false);
   const localRef = useRef<HTMLAudioElement | null>(null);
@@ -33,7 +35,7 @@ export default function Chat() {
 
   useEffect(() => {
     if (!selected || !accessToken) return;
-    fetch(`${apiBase}/api/messages/${selected}`, { headers: { Authorization: `Bearer ${accessToken}` } })
+    authorizedFetch(`${apiBase}/api/messages/${selected}`)
       .then((r) => r.json())
       .then((d) => setMessages(d.messages || []));
   }, [selected, accessToken]);
@@ -55,16 +57,33 @@ export default function Chat() {
   async function send(e: FormEvent) {
     e.preventDefault();
     if (!selected || !me) return;
-    const sk = await ensureSharedKey(selected);
-    const { ciphertext, nonce } = encryptWithSharedKey(sk, input);
-    const res = await fetch(`${apiBase}/api/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ recipientId: selected, ciphertext, nonce }),
-    });
-    const data = await res.json();
-    if (res.ok) setMessages((prev) => [...prev, data.message]);
-    setInput('');
+    if (file) {
+      const form = new FormData();
+      form.append('file', file);
+      const uploadRes = await authorizedFetch(`${apiBase}/api/media`, { method: 'POST', body: form });
+      const { url } = await uploadRes.json();
+      const sk = await ensureSharedKey(selected);
+      const { ciphertext, nonce } = encryptWithSharedKey(sk, `[media] ${url}`);
+      const res = await authorizedFetch(`${apiBase}/api/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipientId: selected, ciphertext, nonce }),
+      });
+      const data = await res.json();
+      if (res.ok) setMessages((prev) => [...prev, data.message]);
+      setFile(null);
+    } else {
+      const sk = await ensureSharedKey(selected);
+      const { ciphertext, nonce } = encryptWithSharedKey(sk, input);
+      const res = await authorizedFetch(`${apiBase}/api/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipientId: selected, ciphertext, nonce }),
+      });
+      const data = await res.json();
+      if (res.ok) setMessages((prev) => [...prev, data.message]);
+      setInput('');
+    }
   }
 
   async function startCall() {
@@ -192,6 +211,7 @@ export default function Chat() {
               placeholder="Сообщение"
               className="flex-1 rounded-xl bg-[#0b0f1a] text-white px-4 py-3 outline-none border border-fuchsia-500/30 focus:border-fuchsia-400"
             />
+            <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} className="text-sm text-fuchsia-200" />
             <button className="px-5 rounded-xl bg-gradient-to-r from-fuchsia-600 to-cyan-500">Отправить</button>
           </form>
         )}

@@ -18,7 +18,9 @@ export default defineConfig({
         start_url: '/',
         icons: [],
       },
-      strategies: 'generateSW',
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.js',
     }),
   ],
 })
